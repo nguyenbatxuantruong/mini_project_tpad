@@ -4,6 +4,7 @@
 #include <linux/usb.h>
 #include <linux/uaccess.h>
 
+#define debug 0
 #define MIN(a,b) (((a) <= (b)) ? (a) : (b))
 #define T_VENDOR_ID     0x045e
 #define T_PRODUCT_ID    0x02ea
@@ -15,9 +16,64 @@
 #define BULK_EP_IN      0x84
 #define MAX_PKT_SIZE    32
 
-static struct usb_device *device;
-static struct usb_class_driver class;
-static unsigned char usb_buff[MAX_PKT_SIZE];
+static struct usb_device *tgamepad_device;
+static struct usb_class_driver tgamepad_class;
+// static unsigned char usb_buff[MAX_PKT_SIZE];
+
+static int tgamepad_hw_read(struct usb_device *dev, char *kbuf)
+{
+    int retval;
+    int read_cnt;
+
+    #if debug
+    int i;
+    #endif
+
+    /* Read the data from the int endpoint */
+    retval = usb_interrupt_msg(dev, usb_rcvintpipe(dev, INT_EP_IN),
+            kbuf, MAX_PKT_SIZE, &read_cnt, 1000);
+    
+    #if debug
+    if (read_cnt > 0)
+    {
+        printk("Debug int buff\n");
+        for(i = 0; i < read_cnt; i++)
+        {
+            printk(" %d,",kernel_buf[i]);
+        }
+        printk(" -- %d\n", read_cnt);
+    }
+    #endif
+
+    if (retval < 0)
+    {
+        printk(KERN_ERR "usb_interrupt_msg return %d\n", retval);
+        return retval;
+    }
+    else
+    {
+        return read_cnt;
+    }
+}
+
+static int tgamepad_hw_write(struct usb_device *dev, char *kbuf)
+{
+    int retval;
+    int write_cnt;
+
+    /* Write the data into the interrupt endpoint */
+    retval = usb_interrupt_msg(dev, usb_sndintpipe(dev, INT_EP_OUT),
+            kbuf, MAX_PKT_SIZE, &write_cnt, 1000);
+    if (retval < 0)
+    {
+        printk(KERN_ERR "usb_interrupt_msg return %d\n", retval);
+        return retval;
+    }
+    else
+    {
+        return 0;
+    }
+}
 
 /***************************************************/
 static int tgamepad_open(struct inode *i, struct file *f)
@@ -30,55 +86,65 @@ static int tgamepad_close(struct inode *i, struct file *f)
     return 0;
 }
 
-static ssize_t tgamepad_read(struct file *f, char __user *buf, size_t cnt, loff_t *off)
+static ssize_t tgamepad_read(struct file *f, char __user *buf, size_t req_cnt, loff_t *off)
 {
-    int retval;
     int read_cnt;
+
     char *kernel_buf = NULL;
 
-    printk("Handle read from %lld, %zu bytes\n", *off, cnt);
     kernel_buf = kzalloc(MAX_PKT_SIZE, GFP_KERNEL);
     if(NULL == kernel_buf)
     {
         return 0;
     }
 
-    /* Read the data from the int endpoint */
-    retval = usb_interrupt_msg(device, usb_rcvintpipe(device, INT_EP_IN),
-            kernel_buf, MAX_PKT_SIZE, &read_cnt, 5000);
-    printk("Debug int buff %s\n", kernel_buf);
-
-    if (retval)
+    read_cnt = tgamepad_hw_read(tgamepad_device, kernel_buf);
+    if (read_cnt < 0)
     {
-        printk(KERN_ERR "INT message returned %d\n", retval);
-        return retval;
+        printk(KERN_ERR "tgamepad_hw_read\n");
+        kfree(kernel_buf);
+        return read_cnt;
     }
-    if (copy_to_user(buf, kernel_buf, MAX_PKT_SIZE))
+
+    if (copy_to_user(buf, kernel_buf, read_cnt))
     {
+        printk(KERN_ERR "ERROR Copy to user\n");
+        kfree(kernel_buf);
         return -EFAULT;
     }
-    return read_cnt;
+    kfree(kernel_buf);
+    return MIN(req_cnt, read_cnt);;
 }
 
-static ssize_t tgamepad_write(struct file *f, const char __user *buf, size_t cnt, loff_t *off)
+static ssize_t tgamepad_write(struct file *f, const char __user *req_buf, size_t cnt, loff_t *off)
 {
     int retval;
-    int wrote_cnt = MIN(cnt, MAX_PKT_SIZE);
+    int write_cnt = MIN(cnt, MAX_PKT_SIZE);
+    char *kernel_buf = NULL;
 
-    if (copy_from_user(usb_buff, buf, MIN(cnt, MAX_PKT_SIZE)))
+    kernel_buf = kzalloc(MAX_PKT_SIZE, GFP_KERNEL);
+    if(NULL == kernel_buf)
     {
+        return 0;
+    }
+
+    if (copy_from_user(kernel_buf, req_buf, MIN(cnt, MAX_PKT_SIZE)))
+    {
+        printk(KERN_ERR "ERROR Copy from user\n");
+        kfree(kernel_buf);
         return -EFAULT;
     }
 
-    /* Write the data into the bulk endpoint */
-    retval = usb_interrupt_msg(device, usb_sndintpipe(device, INT_EP_OUT),
-            usb_buff, MIN(cnt, MAX_PKT_SIZE), &wrote_cnt, 5000);
-    if (retval)
+    /* Write the data */
+    retval = tgamepad_hw_write(tgamepad_device, kernel_buf);
+    if (retval < 0)
     {
-        printk(KERN_ERR "Bulk message returned %d\n", retval);
+        printk(KERN_ERR "tgamepad_hw_write\n");
+        kfree(kernel_buf);
         return retval;
     }
-    return wrote_cnt;
+    kfree(kernel_buf);
+    return write_cnt;
 }
 
 static struct file_operations fops =
@@ -94,26 +160,26 @@ static int tgamepad_probe(struct usb_interface *interface, const struct usb_devi
 {
     int retval;
 
-    device = interface_to_usbdev(interface);
+    tgamepad_device = interface_to_usbdev(interface);
 
-    class.name = "tgamepad%d";
-    class.fops = &fops;
+    tgamepad_class.name = "tgamepad%d";
+    tgamepad_class.fops = &fops;
 
-    if ((retval = usb_register_dev(interface, &class)) < 0)
+    if ((retval = usb_register_dev(interface, &tgamepad_class)) < 0)
     {
         /* Something prevented us from registering this driver */
         printk("Not able to get a minor for this device.");
     }
     else
     {
-        printk(KERN_INFO "Minor obtained: %d\n", interface->minor);
+        printk(KERN_INFO "Minor tgamepad obtained: %d\n", interface->minor);
     }
     return retval;
 }
 
 static void tgamepad_disconnect(struct usb_interface *interface)
 {
-    usb_deregister_dev(interface, &class);
+    usb_deregister_dev(interface, &tgamepad_class);
 }
 
 /* Table of devices that work with this driver */

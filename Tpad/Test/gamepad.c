@@ -4,26 +4,32 @@
 #include <unistd.h>
 
 #define TGAMEPAD "/dev/tgamepad0"
+#define LEN_OF_READ_BYTE 18
+
 int main()
 {
-    char c[32];
+    unsigned char c[LEN_OF_READ_BYTE];
+    int i;
     int fd;
     int rc;
 
     fd = open(TGAMEPAD, 0);
-    if(fd < 0)
+    if (fd < 0)
     {
-	perror("open error\n");
-	exit(0);
+        perror("open error\n");
+        exit(0);
     }
-    while(1)
+    while (1)
     {
-        rc = read(fd, &c, 32);
-	if(rc > 0)
+        rc = read(fd, &c, LEN_OF_READ_BYTE);
+        if (rc > 0)
         {
-	    printf("input = %d, %d, %d, %d, %d, %d, %d, %d -- %d\n", 
-			    c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], rc);
-	}
+            for(i = 0; i < rc; i++)
+            {
+                printf(" %u,",c[i]);
+            }
+            printf(" -- %u\n", rc);
+        }
     }
     return 0;
 }
